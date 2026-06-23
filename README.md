@@ -82,4 +82,4 @@ Visit `http://localhost:5173`.
 - Add anomaly detection for unusual traffic spikes (accidents, events) separate from routine congestion
 
 ## Author
-*(Your name)* — built as part of a 3rd-year B.Tech CSE ML internship project.
+Akshat Chauhan — built as part of a 3rd-year B.Tech CSE ML internship project.
