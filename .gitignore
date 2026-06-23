@@ -1,0 +1,17 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Node
+dashboard/node_modules/
+dashboard/dist/
+
+# Data files (large, regenerable)
+data/features.csv
+
+# Environment
+.env
+
+# OS
+.DS_Store
