@@ -1,0 +1,266 @@
+"""
+FastAPI backend for Smart City Traffic Forecasting.
+
+Serves predictions from the best trained model per junction, plus
+historical data and basic congestion alerting.
+
+Run with: uvicorn api.main:app --reload --port 8000
+(from project root, so it can find the models/ and data/ folders)
+"""
+
+import json
+import os
+import sys
+from datetime import datetime, timedelta
+
+import joblib
+import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+# Allow importing src/features.py when running from project root
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
+from features import build_feature_frame, FEATURE_COLUMNS  # noqa: E402
+
+app = FastAPI(title="Smart City Traffic Forecasting API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
+DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "traffic.csv")
+BEST_MODELS_PATH = os.path.join(os.path.dirname(__file__), "..", "reports", "best_models.csv")
+
+# Congestion thresholds per junction (vehicles/hour) - tuned roughly to each
+# junction's historical distribution. A junction is "high" risk if predicted
+# traffic exceeds its 90th percentile historical volume.
+CONGESTION_PERCENTILE = 0.90
+
+_feature_cache = {}
+_best_model_cache = {}
+_threshold_cache = {}
+
+
+def get_feature_frame():
+    if "df" not in _feature_cache:
+        _feature_cache["df"] = build_feature_frame(DATA_PATH)
+    return _feature_cache["df"]
+
+
+def get_best_model_name(junction: int) -> str:
+    if not _best_model_cache:
+        best_df = pd.read_csv(BEST_MODELS_PATH)
+        for _, row in best_df.iterrows():
+            _best_model_cache[int(row["junction"])] = row["model"]
+    return _best_model_cache.get(junction, "XGBoost")
+
+
+def get_congestion_threshold(junction: int) -> float:
+    if junction not in _threshold_cache:
+        df = get_feature_frame()
+        sub = df[df["Junction"] == junction]["Vehicles"]
+        _threshold_cache[junction] = float(sub.quantile(CONGESTION_PERCENTILE))
+    return _threshold_cache[junction]
+
+
+class PredictionResponse(BaseModel):
+    junction: int
+    datetime: str
+    predicted_vehicles: float
+    model_used: str
+    congestion_risk: str
+    threshold: float
+
+
+
+
+class HistoryPoint(BaseModel):
+    datetime: str
+    vehicles: int
+
+
+@app.get("/")
+def root():
+    return {
+        "message": "Smart City Traffic Forecasting API",
+        "endpoints": ["/junctions", "/history/{junction}", "/predict/{junction}", "/predict/{junction}/next24"],
+    }
+
+
+@app.get("/junctions")
+def list_junctions():
+    """Return basic info about each junction: data range, avg traffic, best model."""
+    df = get_feature_frame()
+    result = []
+    for j in sorted(df["Junction"].unique()):
+        sub = df[df["Junction"] == j]
+        result.append({
+            "junction": int(j),
+            "data_start": str(sub["DateTime"].min()),
+            "data_end": str(sub["DateTime"].max()),
+            "avg_vehicles": round(float(sub["Vehicles"].mean()), 2),
+            "max_vehicles": int(sub["Vehicles"].max()),
+            "best_model": get_best_model_name(int(j)),
+        })
+    return result
+
+
+@app.get("/history/{junction}", response_model=list[HistoryPoint])
+def get_history(junction: int, hours: int = 168):
+    """Return the last `hours` of actual historical traffic for a junction."""
+    df = get_feature_frame()
+    sub = df[df["Junction"] == junction].sort_values("DateTime")
+    if sub.empty:
+        raise HTTPException(status_code=404, detail=f"Junction {junction} not found")
+    sub = sub.tail(hours)
+    return [
+        {"datetime": str(row["DateTime"]), "vehicles": int(row["Vehicles"])}
+        for _, row in sub.iterrows()
+    ]
+
+
+def load_model_for_junction(junction: int, model_name: str):
+    """Load the saved model object for a given junction + model name."""
+    if model_name == "XGBoost":
+        path = os.path.join(MODELS_DIR, f"xgb_junction_{junction}.pkl")
+        if not os.path.exists(path):
+            return None, None
+        return joblib.load(path), "xgboost"
+
+    if model_name == "LSTM":
+        import tensorflow as tf
+        path = os.path.join(MODELS_DIR, f"lstm_junction_{junction}.keras")
+        norm_path = os.path.join(MODELS_DIR, f"lstm_junction_{junction}_norm.json")
+        if not os.path.exists(path):
+            return None, None
+        model = tf.keras.models.load_model(path)
+        with open(norm_path) as f:
+            norm_stats = json.load(f)
+        return (model, norm_stats), "lstm"
+
+    return None, None
+
+
+def predict_next_hour_xgb(model, junction: int):
+    """Predict the next hour using the XGBoost model and latest available features."""
+    df = get_feature_frame()
+    sub = df[df["Junction"] == junction].sort_values("DateTime")
+    last_row = sub.iloc[[-1]][FEATURE_COLUMNS]
+    pred = model.predict(last_row)[0]
+    next_dt = sub["DateTime"].iloc[-1] + timedelta(hours=1)
+    return float(max(pred, 0)), next_dt
+
+
+def predict_next_hour_lstm(model_bundle, junction: int, window: int = 24):
+    """Predict the next hour using the LSTM model and latest 24-hour window."""
+    model, norm_stats = model_bundle
+    mu, sigma = norm_stats["mu"], norm_stats["sigma"]
+
+    df = get_feature_frame()
+    sub = df[df["Junction"] == junction].sort_values("DateTime")
+    last_values = sub["Vehicles"].tail(window).values.astype(float)
+    norm = (last_values - mu) / sigma
+    X = norm.reshape(1, window, 1)
+    pred_norm = model.predict(X, verbose=0)[0, 0]
+    pred = pred_norm * sigma + mu
+    next_dt = sub["DateTime"].iloc[-1] + timedelta(hours=1)
+    return float(max(pred, 0)), next_dt
+@app.get("/predict/{junction}", response_model=PredictionResponse)
+def predict_next_hour(junction: int):
+    """Predict traffic for the next hour at a junction, using its best model."""
+    model_name = get_best_model_name(junction)
+    model_obj, kind = load_model_for_junction(junction, model_name)
+
+    if model_obj is None:
+        raise HTTPException(status_code=404, detail=f"No trained model found for junction {junction}")
+
+    if kind == "xgboost":
+        pred_value, next_dt = predict_next_hour_xgb(model_obj, junction)
+    else:
+        pred_value, next_dt = predict_next_hour_lstm(model_obj, junction)
+
+    threshold = get_congestion_threshold(junction)
+    risk = "high" if pred_value >= threshold else ("medium" if pred_value >= threshold * 0.75 else "low")
+
+    return {
+        "junction": junction,
+        "datetime": str(next_dt),
+        "predicted_vehicles": round(pred_value, 2),
+        "model_used": model_name,
+        "congestion_risk": risk,
+        "threshold": round(threshold, 2),
+    }
+
+
+@app.get("/predict/{junction}/next24")
+def predict_next_24(junction: int):
+    """
+    Predict the next 24 hours iteratively (walk-forward), feeding each
+    prediction back in as input for the next step. This is the realistic
+    deployment scenario: at inference time you don't have ground truth
+    for future hours, so the model must rely on its own prior outputs.
+    """
+    model_name = get_best_model_name(junction)
+    model_obj, kind = load_model_for_junction(junction, model_name)
+
+    if model_obj is None:
+        raise HTTPException(status_code=404, detail=f"No trained model found for junction {junction}")
+
+    df = get_feature_frame()
+    sub = df[df["Junction"] == junction].sort_values("DateTime").copy()
+    threshold = get_congestion_threshold(junction)
+
+    predictions = []
+    last_dt = sub["DateTime"].iloc[-1]
+
+    if kind == "xgboost":
+        working = sub.copy()
+        for step in range(24):
+            last_row = working.iloc[[-1]][FEATURE_COLUMNS]
+            pred = float(max(model_obj.predict(last_row)[0], 0))
+            next_dt = working["DateTime"].iloc[-1] + timedelta(hours=1)
+
+            risk = "high" if pred >= threshold else ("medium" if pred >= threshold * 0.75 else "low")
+            predictions.append({
+                "datetime": str(next_dt),
+                "predicted_vehicles": round(pred, 2),
+                "congestion_risk": risk,
+            })
+
+            new_row = working.iloc[[-1]].copy()
+            new_row["DateTime"] = next_dt
+            new_row["Vehicles"] = pred
+            new_row["hour"] = next_dt.hour
+            new_row["dayofweek"] = next_dt.dayofweek
+            working = pd.concat([working, new_row], ignore_index=True)
+            from features import add_time_features, add_lag_and_rolling_features
+            working = add_time_features(working[["DateTime", "Junction", "Vehicles", "ID"]].ffill())
+            working = add_lag_and_rolling_features(working)
+            working = working.ffill()
+
+    else:
+        model, norm_stats = model_obj
+        mu, sigma = norm_stats["mu"], norm_stats["sigma"]
+        history = list(((sub["Vehicles"].tail(24).values.astype(float)) - mu) / sigma)
+
+        for step in range(24):
+            X = np.array(history[-24:]).reshape(1, 24, 1)
+            pred_norm = model.predict(X, verbose=0)[0, 0]
+            pred = float(max(pred_norm * sigma + mu, 0))
+            next_dt = last_dt + timedelta(hours=step + 1)
+
+            risk = "high" if pred >= threshold else ("medium" if pred >= threshold * 0.75 else "low")
+            predictions.append({
+                "datetime": str(next_dt),
+                "predicted_vehicles": round(pred, 2),
+                "congestion_risk": risk,
+            })
+            history.append((pred - mu) / sigma)
+
+    return {"junction": junction, "model_used": model_name, "threshold": round(threshold, 2), "forecast": predictions}
