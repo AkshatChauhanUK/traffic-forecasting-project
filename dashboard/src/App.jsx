@@ -6,8 +6,7 @@ import {
 import axios from "axios";
 import "./App.css";
 
-const API_BASE = "http://127.0.0.1:8000";
-
+const API_BASE = "https://traffic-forecasting-project-production.up.railway.app";
 const RISK_COLORS = {
   low: "#3DDC84",
   medium: "#FFB020",
