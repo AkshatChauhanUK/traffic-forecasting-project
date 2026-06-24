@@ -4,7 +4,7 @@ An end-to-end machine learning system that forecasts hourly traffic volume acros
 
 ## Live Demo
 - **Dashboard:** [traffic-forecasting-project.vercel.app](https://traffic-forecasting-project.vercel.app)
-- **API:** [traffic-forecasting-project-production.up.railway.app](https://traffic-forecasting-project-production.up.railway.app/junctions)
+- **API:** [traffic-forecasting-project-production.up.railway.app]https://traffic-forecasting-project-production.up.railway.app/junctions
 
 ## Problem Statement
 Government planners need to anticipate traffic congestion before it happens, not just react to it. This project builds a forecasting system that predicts vehicle counts one hour and twenty-four hours ahead at each junction, flags congestion risk, and surfaces it through a real-time monitoring dashboard â€” turning historical traffic data into a decision-support tool for infrastructure planning.
