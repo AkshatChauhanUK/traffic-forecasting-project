@@ -26,6 +26,11 @@ from features import build_feature_frame, FEATURE_COLUMNS  # noqa: E402
 
 app = FastAPI(title="Smart City Traffic Forecasting API")
 
+# NOTE: allow_origins=["*"] is intentionally permissive for this demo so the
+# dashboard (deployed separately on Vercel) can call the API (on Railway)
+# from any origin without CORS config drift between environments. For a
+# real production deployment this should be locked to the dashboard's
+# actual origin instead of "*".
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,6 +47,14 @@ BEST_MODELS_PATH = os.path.join(os.path.dirname(__file__), "..", "reports", "bes
 # traffic exceeds its 90th percentile historical volume.
 CONGESTION_PERCENTILE = 0.90
 
+# Only these models have an inference path below (load_model_for_junction).
+# SARIMA is trained and scored in src/train_models.py for comparison purposes,
+# but is deliberately excluded from "best model" selection (see that file)
+# and is NOT servable here - there's no SARIMA load/predict path implemented.
+# If that ever changes, add "SARIMA" handling to load_model_for_junction
+# before removing it from the exclusion list in train_models.py.
+SERVABLE_MODELS = {"XGBoost", "LSTM"}
+
 _feature_cache = {}
 _best_model_cache = {}
 _threshold_cache = {}
@@ -53,11 +66,23 @@ def get_feature_frame():
     return _feature_cache["df"]
 
 
+def get_known_junctions() -> set[int]:
+    df = get_feature_frame()
+    return set(int(j) for j in df["Junction"].unique())
+
+
 def get_best_model_name(junction: int) -> str:
     if not _best_model_cache:
         best_df = pd.read_csv(BEST_MODELS_PATH)
         for _, row in best_df.iterrows():
-            _best_model_cache[int(row["junction"])] = row["model"]
+            model_name = row["model"]
+            if model_name not in SERVABLE_MODELS:
+                # Defensive guard: best_models.csv should already exclude
+                # non-servable models (see train_models.py), but if it ever
+                # doesn't, fall back instead of trying to load a model with
+                # no inference path.
+                model_name = "XGBoost"
+            _best_model_cache[int(row["junction"])] = model_name
     return _best_model_cache.get(junction, "XGBoost")
 
 
@@ -171,9 +196,20 @@ def predict_next_hour_lstm(model_bundle, junction: int, window: int = 24):
     pred = pred_norm * sigma + mu
     next_dt = sub["DateTime"].iloc[-1] + timedelta(hours=1)
     return float(max(pred, 0)), next_dt
+
+
+def _require_known_junction(junction: int):
+    """Raise a clean 404 for unknown junctions instead of letting a bad
+    junction id fall through to an unhandled error deeper in the pipeline."""
+    if junction not in get_known_junctions():
+        raise HTTPException(status_code=404, detail=f"Junction {junction} not found")
+
+
 @app.get("/predict/{junction}", response_model=PredictionResponse)
 def predict_next_hour(junction: int):
     """Predict traffic for the next hour at a junction, using its best model."""
+    _require_known_junction(junction)
+
     model_name = get_best_model_name(junction)
     model_obj, kind = load_model_for_junction(junction, model_name)
 
@@ -205,7 +241,14 @@ def predict_next_24(junction: int):
     prediction back in as input for the next step. This is the realistic
     deployment scenario: at inference time you don't have ground truth
     for future hours, so the model must rely on its own prior outputs.
+
+    (This matches how the LSTM is now evaluated in src/train_models.py too -
+    that function previously leaked ground-truth test values into its
+    walk-forward loop, which has been fixed so reported metrics reflect
+    this same real walk-forward behavior.)
     """
+    _require_known_junction(junction)
+
     model_name = get_best_model_name(junction)
     model_obj, kind = load_model_for_junction(junction, model_name)
 

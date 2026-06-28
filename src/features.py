@@ -11,6 +11,12 @@ import numpy as np
 # Indian public holidays observed in the dataset window (Nov 2015 - Jun 2017).
 # Hand-curated list (major national holidays) since the project targets an
 # Indian "smart city" use case. Extend this list if you adapt to other years.
+#
+# NOTE: This list only covers 2015-2017. If you extend the dataset or run
+# next-24h forecasts that roll into an unlisted year, is_holiday will
+# silently default to 0 for those dates rather than raising an error.
+# That's acceptable for this project's date range, but worth knowing if
+# you adapt this for a live, ongoing deployment.
 INDIA_HOLIDAYS = [
     "2015-11-11", "2015-11-25", "2015-12-25",
     "2016-01-01", "2016-01-26", "2016-03-07", "2016-03-24", "2016-04-14",

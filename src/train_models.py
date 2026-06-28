@@ -120,8 +120,21 @@ def make_lstm_sequences(values: np.ndarray, window: int):
 
 
 def train_lstm(train: pd.DataFrame, test: pd.DataFrame):
-    """LSTM on normalized Vehicles sequences, using trailing window of train
-    to seed the first predictions of the test period (walk-forward)."""
+    """LSTM on normalized Vehicles sequences.
+
+    Walk-forward evaluation: at each test step, the model only sees its OWN
+    prior predictions plus the real training history that came before the
+    test period - never the true future value for the step it's currently
+    predicting. This matches how /predict/{junction}/next24 actually serves
+    predictions in production (it can't know the real future either), so the
+    reported test-set RMSE/MAPE reflect genuine deployment performance.
+
+    (Earlier version of this function fed the true test-set value into
+    `history` after each step instead of the prediction - that's teacher
+    forcing, not walk-forward, and it made LSTM's test metrics look better
+    than the model would actually perform in /predict/{junction}/next24.
+    Fixed here so training-time eval matches serving-time behavior.)
+    """
     full = pd.concat([train, test])[TARGET_COLUMN].values.astype(float)
     train_len = len(train)
 
@@ -144,14 +157,15 @@ def train_lstm(train: pd.DataFrame, test: pd.DataFrame):
     es = EarlyStopping(monitor="loss", patience=5, restore_best_weights=True)
     model.fit(X_train, y_train, epochs=30, batch_size=64, verbose=0, callbacks=[es])
 
-    # Walk-forward prediction over the test period
+    # True walk-forward prediction over the test period: feed the model's
+    # OWN prediction back in as history, never the real future value.
     history = list(norm[:train_len])
     preds_norm = []
     for i in range(len(test)):
         window = np.array(history[-LSTM_WINDOW:]).reshape(1, LSTM_WINDOW, 1)
         pred = model.predict(window, verbose=0)[0, 0]
         preds_norm.append(pred)
-        history.append(norm[train_len + i])
+        history.append(pred)  # <-- fixed: was `norm[train_len + i]` (ground truth leak)
 
     preds = np.array(preds_norm) * sigma + mu
     preds = np.clip(preds, 0, None)
@@ -216,9 +230,15 @@ def run_all():
     with open("reports/predictions.json", "w") as f:
         json.dump(predictions_store, f)
 
-    best = results_df.loc[results_df.groupby("junction")["rmse"].idxmin()]
+    # Only select among models that are actually servable by the API.
+    # SARIMA is excluded from "best model" selection on purpose: api/main.py
+    # has no SARIMA inference path (it only loads XGBoost/LSTM artifacts),
+    # so picking SARIMA as "best" would silently break /predict at serve time.
+    # See README "What I'd Improve Next" for the plan to add SARIMA serving.
+    servable = results_df[results_df["model"].isin(["XGBoost", "LSTM"])]
+    best = servable.loc[servable.groupby("junction")["rmse"].idxmin()]
     best.to_csv("reports/best_models.csv", index=False)
-    print("\nBest model per junction:")
+    print("\nBest model per junction (servable models only):")
     print(best)
 
     return results_df
