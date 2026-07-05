@@ -22,38 +22,31 @@ from pydantic import BaseModel
 
 # Allow importing src/features.py when running from project root
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
-from features import build_feature_frame, FEATURE_COLUMNS  # noqa: E402
+from features import build_feature_frame, FEATURE_COLUMNS, get_sarima_exog  # noqa: E402
 
 app = FastAPI(title="Smart City Traffic Forecasting API")
 
-# NOTE: allow_origins=["*"] is intentionally permissive for this demo so the
-# dashboard (deployed separately on Vercel) can call the API (on Railway)
-# from any origin without CORS config drift between environments. For a
-# real production deployment this should be locked to the dashboard's
-# actual origin instead of "*".
+ALLOWED_ORIGINS = [
+    "https://traffic-forecasting-project.vercel.app",
+    "http://localhost:5173",  # local dev
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
-MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
+MODELS_DIR = r"E:\traffic-forecasting-project\traffic-forecasting-project\models"
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "traffic.csv")
-BEST_MODELS_PATH = os.path.join(os.path.dirname(__file__), "..", "reports", "best_models.csv")
+BEST_MODELS_PATH = r"E:\traffic-forecasting-project\traffic-forecasting-project\reports\best_models.csv"
 
-# Congestion thresholds per junction (vehicles/hour) - tuned roughly to each
-# junction's historical distribution. A junction is "high" risk if predicted
-# traffic exceeds its 90th percentile historical volume.
 CONGESTION_PERCENTILE = 0.90
 
-# Only these models have an inference path below (load_model_for_junction).
-# SARIMA is trained and scored in src/train_models.py for comparison purposes,
-# but is deliberately excluded from "best model" selection (see that file)
-# and is NOT servable here - there's no SARIMA load/predict path implemented.
-# If that ever changes, add "SARIMA" handling to load_model_for_junction
-# before removing it from the exclusion list in train_models.py.
-SERVABLE_MODELS = {"XGBoost", "LSTM"}
+# All three models are now servable — SARIMA saves a .pkl artifact in models/
+# and has a full inference path below.
+SERVABLE_MODELS = {"XGBoost", "LSTM", "SARIMA"}
 
 _feature_cache = {}
 _best_model_cache = {}
@@ -169,6 +162,12 @@ def load_model_for_junction(junction: int, model_name: str):
             norm_stats = json.load(f)
         return (model, norm_stats), "lstm"
 
+    if model_name == "SARIMA":
+        path = os.path.join(MODELS_DIR, f"sarima_junction_{junction}.pkl")
+        if not os.path.exists(path):
+            return None, None
+        return joblib.load(path), "sarima"
+
     return None, None
 
 
@@ -198,6 +197,24 @@ def predict_next_hour_lstm(model_bundle, junction: int, window: int = 24):
     return float(max(pred, 0)), next_dt
 
 
+def predict_next_hour_sarima(fit, junction: int):
+    """Predict the next hour using the fitted SARIMAX model with exog features."""
+    df = get_feature_frame()
+    sub = df[df["Junction"] == junction].sort_values("DateTime")
+    next_dt = sub["DateTime"].iloc[-1] + timedelta(hours=1)
+    # Build a one-row exog frame for the next hour using its calendar features
+    next_row = pd.DataFrame({"DateTime": [next_dt]})
+    next_row["DateTime"] = pd.to_datetime(next_row["DateTime"])
+    from features import add_time_features, INDIA_HOLIDAYS
+    next_row["Junction"] = junction
+    next_row["Vehicles"] = 0
+    next_row["ID"] = 0
+    next_row = add_time_features(next_row)
+    exog = get_sarima_exog(next_row).values
+    pred = float(max(fit.forecast(steps=1, exog=exog)[0], 0))
+    return pred, next_dt
+
+
 def _require_known_junction(junction: int):
     """Raise a clean 404 for unknown junctions instead of letting a bad
     junction id fall through to an unhandled error deeper in the pipeline."""
@@ -218,6 +235,8 @@ def predict_next_hour(junction: int):
 
     if kind == "xgboost":
         pred_value, next_dt = predict_next_hour_xgb(model_obj, junction)
+    elif kind == "sarima":
+        pred_value, next_dt = predict_next_hour_sarima(model_obj, junction)
     else:
         pred_value, next_dt = predict_next_hour_lstm(model_obj, junction)
 
@@ -262,7 +281,23 @@ def predict_next_24(junction: int):
     predictions = []
     last_dt = sub["DateTime"].iloc[-1]
 
-    if kind == "xgboost":
+    if kind == "sarima":
+        from features import add_time_features
+        for step in range(24):
+            next_dt = last_dt + timedelta(hours=step + 1)
+            next_row = pd.DataFrame({"DateTime": [next_dt], "Junction": junction,
+                                     "Vehicles": 0, "ID": 0})
+            next_row = add_time_features(next_row)
+            exog = get_sarima_exog(next_row).values
+            pred = float(max(model_obj.forecast(steps=1, exog=exog)[0], 0))
+            risk = "high" if pred >= threshold else ("medium" if pred >= threshold * 0.75 else "low")
+            predictions.append({
+                "datetime": str(next_dt),
+                "predicted_vehicles": round(pred, 2),
+                "congestion_risk": risk,
+            })
+
+    elif kind == "xgboost":
         working = sub.copy()
         for step in range(24):
             last_row = working.iloc[[-1]][FEATURE_COLUMNS]

@@ -32,7 +32,8 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 
-from features import build_feature_frame, FEATURE_COLUMNS, TARGET_COLUMN
+from features import (build_feature_frame, FEATURE_COLUMNS, TARGET_COLUMN,
+                      SARIMA_EXOG_COLUMNS, get_sarima_exog)
 
 tf.random.set_seed(42)
 np.random.seed(42)
@@ -64,30 +65,42 @@ def split_train_test(df_j: pd.DataFrame):
 
 def train_sarima(train: pd.DataFrame, test: pd.DataFrame):
     """
-    SARIMA baseline using only the Vehicles series (no exogenous features).
+    SARIMAX with exogenous features (is_holiday, is_weekend, rush-hour flags).
 
-    NOTE: Full seasonal SARIMAX with period=24 on 14,000+ hourly rows needs
-    a huge internal state-space matrix and can exhaust memory on a laptop.
-    To keep this tractable, we:
-      1. Train on only the trailing SARIMA_TRAIN_HOURS of history (recent
-         data is most relevant for forecasting near-term traffic anyway).
-      2. Use the Kalman filter method that is more memory-frugal.
+    Adding exogenous features gives SARIMA context it previously lacked —
+    it can now account for holiday dips and rush-hour peaks rather than
+    treating every hour identically. This makes the three-way comparison
+    (SARIMA vs XGBoost vs LSTM) fairer, since XGBoost already exploits
+    these calendar signals via its engineered feature set.
+
+    Memory notes (same as before):
+      - Trained on only the trailing 60 days to avoid a huge state-space matrix.
+      - seasonal D=0, simple_differencing=True, method="powell" for stability.
     """
-    SARIMA_TRAIN_HOURS = 24 * 60  # last 60 days of history is plenty for a
-                                   # daily-seasonal model and keeps memory low
+    SARIMA_TRAIN_HOURS = 24 * 60
     y_full = train[TARGET_COLUMN].values
-    y_train = y_full[-SARIMA_TRAIN_HOURS:] if len(y_full) > SARIMA_TRAIN_HOURS else y_full
+    exog_full = get_sarima_exog(train).values
+
+    if len(y_full) > SARIMA_TRAIN_HOURS:
+        y_train = y_full[-SARIMA_TRAIN_HOURS:]
+        exog_train = exog_full[-SARIMA_TRAIN_HOURS:]
+    else:
+        y_train = y_full
+        exog_train = exog_full
+
+    exog_test = get_sarima_exog(test).values
 
     model = SARIMAX(
         y_train,
+        exog=exog_train,
         order=(1, 1, 1),
-        seasonal_order=(1, 0, 1, 24),
+        seasonal_order=(0, 0, 0, 0),
         enforce_stationarity=False,
         enforce_invertibility=False,
         simple_differencing=True,
     )
     fit = model.fit(disp=False, method="powell", maxiter=50)
-    preds = fit.forecast(steps=len(test))
+    preds = fit.forecast(steps=len(test), exog=exog_test)
     preds = np.clip(preds, 0, None)
     return preds, fit
 
@@ -176,8 +189,10 @@ def run_all():
     print("Building feature frame...")
     df = build_feature_frame("data/traffic.csv")
 
-    os.makedirs("models", exist_ok=True)
-    os.makedirs("reports", exist_ok=True)
+    os.makedirs(r"E:\traffic-forecasting-project\traffic-forecasting-project\models", exist_ok=True)
+    os.makedirs(r"E:\traffic-forecasting-project\traffic-forecasting-project\reports", exist_ok=True)
+    MODELS_OUT = r"E:\traffic-forecasting-project\traffic-forecasting-project\models"
+    REPORTS_OUT = r"E:\traffic-forecasting-project\traffic-forecasting-project\reports"
 
     results = []
     predictions_store = {}
@@ -197,9 +212,11 @@ def run_all():
 
         try:
             print("  Training SARIMA...")
-            preds_sarima, _ = train_sarima(train, test)
+            preds_sarima, sarima_fit = train_sarima(train, test)
             results.append(evaluate(y_test, preds_sarima, "SARIMA", junction))
             junction_preds["sarima"] = preds_sarima.tolist()
+            # Save the fitted SARIMA model so api/main.py can load it for inference.
+            joblib.dump(sarima_fit, f"{MODELS_OUT}\\sarima_junction_{junction}.pkl")
         except Exception as e:
             print(f"  SARIMA failed: {e}")
 
@@ -207,15 +224,15 @@ def run_all():
         preds_xgb, xgb_model = train_xgboost(train, test)
         results.append(evaluate(y_test, preds_xgb, "XGBoost", junction))
         junction_preds["xgboost"] = preds_xgb.tolist()
-        joblib.dump(xgb_model, f"models/xgb_junction_{junction}.pkl")
+        joblib.dump(xgb_model, f"{MODELS_OUT}\\xgb_junction_{junction}.pkl")
 
         try:
             print("  Training LSTM...")
             preds_lstm, lstm_model, norm_stats = train_lstm(train, test)
             results.append(evaluate(y_test, preds_lstm, "LSTM", junction))
             junction_preds["lstm"] = preds_lstm.tolist()
-            lstm_model.save(f"models/lstm_junction_{junction}.keras")
-            with open(f"models/lstm_junction_{junction}_norm.json", "w") as f:
+            lstm_model.save(f"{MODELS_OUT}\\lstm_junction_{junction}.keras")
+            with open(f"{MODELS_OUT}\\lstm_junction_{junction}_norm.json", "w") as f:
                 json.dump({"mu": float(norm_stats[0]), "sigma": float(norm_stats[1])}, f)
         except Exception as e:
             print(f"  LSTM failed: {e}")
@@ -223,22 +240,17 @@ def run_all():
         predictions_store[str(junction)] = junction_preds
 
     results_df = pd.DataFrame(results)
-    results_df.to_csv("reports/model_comparison.csv", index=False)
+    results_df.to_csv(f"{REPORTS_OUT}\\model_comparison.csv", index=False)
     print("\n=== Final comparison ===")
     print(results_df.sort_values(["junction", "rmse"]))
 
-    with open("reports/predictions.json", "w") as f:
+    with open(f"{REPORTS_OUT}\\predictions.json", "w") as f:
         json.dump(predictions_store, f)
 
-    # Only select among models that are actually servable by the API.
-    # SARIMA is excluded from "best model" selection on purpose: api/main.py
-    # has no SARIMA inference path (it only loads XGBoost/LSTM artifacts),
-    # so picking SARIMA as "best" would silently break /predict at serve time.
-    # See README "What I'd Improve Next" for the plan to add SARIMA serving.
-    servable = results_df[results_df["model"].isin(["XGBoost", "LSTM"])]
+    servable = results_df[results_df["model"].isin(["XGBoost", "LSTM", "SARIMA"])]
     best = servable.loc[servable.groupby("junction")["rmse"].idxmin()]
-    best.to_csv("reports/best_models.csv", index=False)
-    print("\nBest model per junction (servable models only):")
+    best.to_csv(f"{REPORTS_OUT}\\best_models.csv", index=False)
+    print("\nBest model per junction:")
     print(best)
 
     return results_df

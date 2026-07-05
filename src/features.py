@@ -98,6 +98,18 @@ def build_feature_frame(raw_csv_path: str) -> pd.DataFrame:
     return df
 
 
+SARIMA_EXOG_COLUMNS = [
+    "is_holiday", "is_weekend", "is_morning_rush", "is_evening_rush",
+]
+
+
+def get_sarima_exog(df: pd.DataFrame) -> pd.DataFrame:
+    """Return the exogenous feature matrix used by SARIMAX.
+    These are the same calendar features already computed by add_time_features,
+    just selected into a clean sub-frame for easy passing to SARIMAX."""
+    return df[SARIMA_EXOG_COLUMNS].copy()
+
+
 FEATURE_COLUMNS = [
     "hour", "dayofweek", "month", "is_weekend", "is_holiday",
     "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos",
