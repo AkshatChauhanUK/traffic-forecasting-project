@@ -38,9 +38,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODELS_DIR = r"E:\traffic-forecasting-project\traffic-forecasting-project\models"
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "traffic.csv")
-BEST_MODELS_PATH = r"E:\traffic-forecasting-project\traffic-forecasting-project\reports\best_models.csv"
+BEST_MODELS_PATH = os.path.join(os.path.dirname(__file__), "..", "reports", "best_models.csv")
 
 CONGESTION_PERCENTILE = 0.90
 
@@ -107,7 +107,7 @@ class HistoryPoint(BaseModel):
 def root():
     return {
         "message": "Smart City Traffic Forecasting API",
-        "endpoints": ["/junctions", "/history/{junction}", "/predict/{junction}", "/predict/{junction}/next24"],
+        "endpoints": ["/junctions", "/history/{junction}", "/predict/{junction}", "/predict/{junction}/next24", "/anomalies/{junction}"],
     }
 
 
@@ -342,3 +342,62 @@ def predict_next_24(junction: int):
             history.append((pred - mu) / sigma)
 
     return {"junction": junction, "model_used": model_name, "threshold": round(threshold, 2), "forecast": predictions}
+
+
+@app.get("/anomalies/{junction}")
+def get_anomalies(junction: int, hours: int = 72):
+    """
+    Detect unusual traffic spikes in the last `hours` of historical data.
+
+    An hour is flagged as an anomaly when its vehicle count deviates more than
+    2 standard deviations from the historical mean for that same weekday+hour
+    combination (e.g. comparing Monday 8am to all other Monday 8ams in history).
+    This separates genuine surprises (accidents, events) from routine congestion,
+    which the congestion threshold already handles.
+    """
+    _require_known_junction(junction)
+
+    df = get_feature_frame()
+    sub = df[df["Junction"] == junction].sort_values("DateTime").copy()
+
+    if sub.empty:
+        raise HTTPException(status_code=404, detail=f"Junction {junction} not found")
+
+    # Compute historical mean and std per (dayofweek, hour) group
+    stats = (
+        sub.groupby(["dayofweek", "hour"])["Vehicles"]
+        .agg(["mean", "std"])
+        .reset_index()
+        .rename(columns={"mean": "hist_mean", "std": "hist_std"})
+    )
+    # Fill zero std (only one data point for that slot) with global std
+    global_std = sub["Vehicles"].std()
+    stats["hist_std"] = stats["hist_std"].fillna(global_std).replace(0, global_std)
+
+    # Check last `hours` rows
+    recent = sub.tail(hours).copy()
+    recent = recent.merge(stats, on=["dayofweek", "hour"], how="left")
+    recent["z_score"] = (recent["Vehicles"] - recent["hist_mean"]) / recent["hist_std"]
+    recent["is_anomaly"] = recent["z_score"].abs() > 2.0
+    recent["anomaly_type"] = recent.apply(
+        lambda r: "spike" if r["z_score"] > 2.0 else ("dip" if r["z_score"] < -2.0 else "normal"),
+        axis=1
+    )
+
+    anomalies = recent[recent["is_anomaly"]].copy()
+
+    return {
+        "junction": junction,
+        "hours_checked": hours,
+        "total_anomalies": int(len(anomalies)),
+        "anomalies": [
+            {
+                "datetime": str(row["DateTime"]),
+                "vehicles": int(row["Vehicles"]),
+                "expected": round(float(row["hist_mean"]), 1),
+                "z_score": round(float(row["z_score"]), 2),
+                "type": row["anomaly_type"],
+            }
+            for _, row in anomalies.iterrows()
+        ],
+    }
