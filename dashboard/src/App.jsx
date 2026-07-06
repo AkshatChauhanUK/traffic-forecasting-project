@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine,
+  ResponsiveContainer, ReferenceLine, Scatter, ScatterChart,
+  ComposedChart, ZAxis,
 } from "recharts";
 import axios from "axios";
 import "./App.css";
 
-const API_BASE = "https://traffic-forecasting-project-production.up.railway.app";
+const API_BASE = "http://localhost:8000";
 const RISK_COLORS = {
   low: "#3DDC84",
   medium: "#FFB020",
@@ -21,12 +22,50 @@ function RiskBadge({ risk }) {
   );
 }
 
+// Custom dot renderer — shows a red triangle on anomaly points, nothing on normal points
+function AnomalyDot(props) {
+  const { cx, cy, payload } = props;
+  if (!payload?.isAnomaly) return null;
+  return (
+    <g>
+      <polygon
+        points={`${cx},${cy - 10} ${cx - 7},${cy + 4} ${cx + 7},${cy + 4}`}
+        fill="#FF4D4F"
+        opacity={0.9}
+      />
+      <text x={cx} y={cy - 14} textAnchor="middle" fill="#FF4D4F" fontSize={10}>⚠</text>
+    </g>
+  );
+}
+
+// Custom tooltip — shows anomaly info when hovering over a flagged point
+function CustomTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  const d = payload[0]?.payload;
+  return (
+    <div style={{
+      background: "#1A1F2B", border: "1px solid #2A3142", borderRadius: 8,
+      padding: "8px 12px", fontSize: 12,
+    }}>
+      <p style={{ color: "#8B95A8", margin: 0 }}>{label}</p>
+      {d?.actual != null && <p style={{ color: "#5B9DFF", margin: "4px 0 0" }}>Actual: {d.actual}</p>}
+      {d?.predicted != null && <p style={{ color: "#FFB020", margin: "4px 0 0" }}>Predicted: {d.predicted}</p>}
+      {d?.isAnomaly && (
+        <p style={{ color: "#FF4D4F", margin: "6px 0 0", fontWeight: "bold" }}>
+          ⚠ Anomaly — {d.anomalyType} (z={d.zScore})
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [junctions, setJunctions] = useState([]);
   const [selected, setSelected] = useState(1);
   const [history, setHistory] = useState([]);
   const [forecast, setForecast] = useState(null);
   const [current, setCurrent] = useState(null);
+  const [anomalies, setAnomalies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -43,11 +82,13 @@ export default function App() {
       axios.get(`${API_BASE}/history/${junctionId}?hours=72`),
       axios.get(`${API_BASE}/predict/${junctionId}/next24`),
       axios.get(`${API_BASE}/predict/${junctionId}`),
+      axios.get(`${API_BASE}/anomalies/${junctionId}`),
     ])
-      .then(([histRes, forecastRes, predictRes]) => {
+      .then(([histRes, forecastRes, predictRes, anomalyRes]) => {
         setHistory(histRes.data);
         setForecast(forecastRes.data);
         setCurrent(predictRes.data);
+        setAnomalies(anomalyRes.data.anomalies || []);
       })
       .catch(() => setError("Couldn't load data for this junction."))
       .finally(() => setLoading(false));
@@ -57,19 +98,34 @@ export default function App() {
     loadJunctionData(selected);
   }, [selected, loadJunctionData]);
 
+  // Build a set of anomaly datetimes for fast lookup
+  const anomalyMap = {};
+  anomalies.forEach((a) => {
+    anomalyMap[a.datetime] = a;
+  });
+
   const chartData = [
-    ...history.map((h) => ({
-      time: h.datetime.slice(5, 16),
-      actual: h.vehicles,
-      predicted: null,
-    })),
+    ...history.map((h) => {
+      const anomaly = anomalyMap[h.datetime];
+      return {
+        time: h.datetime.slice(5, 16),
+        actual: h.vehicles,
+        predicted: null,
+        isAnomaly: !!anomaly,
+        anomalyType: anomaly?.type || null,
+        zScore: anomaly?.z_score || null,
+      };
+    }),
     ...(forecast?.forecast || []).map((f) => ({
       time: f.datetime.slice(5, 16),
       actual: null,
       predicted: f.predicted_vehicles,
       risk: f.congestion_risk,
+      isAnomaly: false,
     })),
   ];
+
+  const anomalyCount = anomalies.length;
 
   return (
     <div className="dashboard">
@@ -117,6 +173,13 @@ export default function App() {
               <span className="stat-value model-value">{current?.model_used ?? "--"}</span>
               <span className="stat-unit">best performer for this junction</span>
             </div>
+            <div className="stat-card" style={{ borderColor: anomalyCount > 0 ? "#FF4D4F44" : undefined }}>
+              <span className="stat-label">Anomalies (last 72h)</span>
+              <span className="stat-value" style={{ color: anomalyCount > 0 ? "#FF4D4F" : "#3DDC84" }}>
+                {anomalyCount > 0 ? `⚠ ${anomalyCount}` : "✓ 0"}
+              </span>
+              <span className="stat-unit">unusual spikes detected</span>
+            </div>
           </div>
 
           <div className="chart-panel">
@@ -125,17 +188,17 @@ export default function App() {
               <div className="legend">
                 <span className="legend-item"><i className="dot actual" />Actual</span>
                 <span className="legend-item"><i className="dot predicted" />Predicted</span>
+                {anomalyCount > 0 && (
+                  <span className="legend-item" style={{ color: "#FF4D4F" }}>▲ Anomaly</span>
+                )}
               </div>
             </div>
             <ResponsiveContainer width="100%" height={340}>
-              <LineChart data={chartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+              <ComposedChart data={chartData} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
                 <CartesianGrid stroke="#2A3142" strokeDasharray="3 3" />
                 <XAxis dataKey="time" tick={{ fill: "#8B95A8", fontSize: 11 }} interval={Math.floor(chartData.length / 8)} />
                 <YAxis tick={{ fill: "#8B95A8", fontSize: 11 }} />
-                <Tooltip
-                  contentStyle={{ background: "#1A1F2B", border: "1px solid #2A3142", borderRadius: 8 }}
-                  labelStyle={{ color: "#8B95A8" }}
-                />
+                <Tooltip content={<CustomTooltip />} />
                 {current && (
                   <ReferenceLine
                     y={current.threshold}
@@ -144,9 +207,25 @@ export default function App() {
                     label={{ value: "congestion threshold", fill: "#FF4D4F", fontSize: 11, position: "insideTopRight" }}
                   />
                 )}
-                <Line type="monotone" dataKey="actual" stroke="#5B9DFF" strokeWidth={2} dot={false} connectNulls={false} />
-                <Line type="monotone" dataKey="predicted" stroke="#FFB020" strokeWidth={2} strokeDasharray="5 3" dot={false} connectNulls={false} />
-              </LineChart>
+                <Line
+                  type="monotone"
+                  dataKey="actual"
+                  stroke="#5B9DFF"
+                  strokeWidth={2}
+                  dot={<AnomalyDot />}
+                  activeDot={{ r: 4 }}
+                  connectNulls={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="predicted"
+                  stroke="#FFB020"
+                  strokeWidth={2}
+                  strokeDasharray="5 3"
+                  dot={false}
+                  connectNulls={false}
+                />
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
 
