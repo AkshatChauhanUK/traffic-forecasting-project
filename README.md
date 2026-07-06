@@ -28,13 +28,13 @@ Three model families trained and evaluated **per junction** (separate train/test
 
 | Model | Approach |
 |---|---|
-| SARIMA | Classical statistical baseline on the raw series |
+| SARIMA | Statistical model with exogenous features (holidays, rush-hour flags) |
 | XGBoost | Gradient boosting on engineered lag/time features |
 | LSTM | Sequence model on raw trailing windows |
 
-*SARIMA note: trained on only the trailing 60 days with seasonal differencing off and a lighter optimizer, to avoid the huge memory footprint a full seasonal model hits on 14,000+ hourly rows.*
+*SARIMA note: trained on only the trailing 60 days with a lighter optimizer to avoid memory issues on 14,000+ hourly rows. Exogenous features (holidays, rush hour) were added in Week 3 for a fairer comparison — previously SARIMA only saw the raw series with no calendar context.*
 
-**Result:** XGBoost won on **all four junctions** — both LSTM and SARIMA underperformed it, with SARIMA the weakest.
+**Result:** XGBoost won on **all four junctions** — both LSTM and SARIMA underperformed it, with SARIMA the weakest even after adding exogenous features.
 
 **Evaluation note:** LSTM's test-set loop used to leak the true future value back into its own history at each step ("teacher forcing"), which made its scores look better than real deployment performance. Fixed now — it only feeds back its own predictions, matching exactly how `/predict/{junction}/next24` works live. Post-fix, LSTM's error rose a lot (e.g. Junction 3's MAPE: ~18% → ~114%) since its mistakes now compound over the walk-forward window — that's the honest number, and it's why XGBoost wins everywhere once compared fairly.
 
@@ -52,16 +52,16 @@ Three model families trained and evaluated **per junction** (separate train/test
 |---|---|---|---|---|
 | 1 | XGBoost | 4.44 | 3.25 | 4.6% |
 | 1 | LSTM | 42.44 | 35.24 | 43.6% |
-| 1 | SARIMA | 74.74 | 69.36 | 94.6% |
+| 1 | SARIMA | 77.55 | 72.54 | 99.7% |
 | 2 | XGBoost | 2.74 | 2.18 | 9.8% |
-| 2 | LSTM | 13.83 | 11.03 | 43.2% |
-| 2 | SARIMA | 26.20 | 24.21 | 94.9% |
+| 2 | LSTM | 15.36 | 12.79 | 47.4% |
+| 2 | SARIMA | 27.10 | 25.22 | 99.6% |
 | 3 | XGBoost | 8.77 | 3.51 | 17.7% |
-| 3 | LSTM | 19.22 | 14.36 | 114.2% |
-| 3 | SARIMA | 23.08 | 19.17 | 96.5% |
+| 3 | LSTM | 11.14 | 5.42 | 23.8% |
+| 3 | SARIMA | 23.55 | 19.71 | 99.8% |
 | 4 | XGBoost | 3.78 | 2.53 | 34.4% |
-| 4 | LSTM | 4.94 | 3.30 | 39.0% |
-| 4 | SARIMA | 9.83 | 8.51 | 95.2% |
+| 4 | LSTM | 4.79 | 3.22 | 38.2% |
+| 4 | SARIMA | 10.09 | 8.81 | 99.3% |
 
 </details>
 
@@ -71,8 +71,11 @@ FastAPI backend serving:
 - `GET /history/{junction}` — recent actual traffic
 - `GET /predict/{junction}` — next-hour forecast with congestion risk
 - `GET /predict/{junction}/next24` — 24-hour walk-forward forecast
+- `GET /anomalies/{junction}` — flags unusual traffic spikes in the last 72h, separate from routine congestion
 
-Each junction automatically uses whichever model performed best for it during evaluation — restricted to models the API can actually serve (XGBoost, LSTM). SARIMA is trained and scored for the comparison above but deliberately excluded from "best model" selection, since there's no SARIMA inference path implemented yet (see "What I'd Improve Next"). In practice this exclusion currently has no effect on serving anyway, since XGBoost now wins on every junction.
+All three models (XGBoost, LSTM, SARIMA) are now fully servable — SARIMA previously had no inference path, now it loads a saved `.pkl` and predicts with exogenous features. CORS is locked to the dashboard's Vercel origin.
+
+**Anomaly detection:** an hour is flagged as a spike or dip when its vehicle count is more than 2 standard deviations away from the historical average for that same weekday+hour combination — so a busy Monday 8am only gets flagged if it's unusually busy even for a Monday 8am.
 
 ### 4. Dashboard (`dashboard/`)
 A React + Recharts console showing live predictions, a 72h-actual vs 24h-forecast chart with a congestion threshold line, and an hour-by-hour risk strip — built for a 2-minute live demo, not just a notebook printout.
@@ -102,12 +105,9 @@ npm run dev
 Visit `http://localhost:5173`.
 
 ## What I'd Improve Next
-- Add a SARIMA inference path to the API (currently trained/scored for comparison only, but not servable)
-- Add exogenous features to SARIMA (holidays, rush hour) — it currently underperforms everywhere, partly because it only sees the raw series with no calendar/rush-hour context
-- Investigate why LSTM's walk-forward error compounds so much over 24h (junction 3 in particular) — possibly a shorter lookback window, retraining on residuals, or a hybrid that blends LSTM with XGBoost's lag features
+- Investigate why LSTM's walk-forward error compounds so much over 24h (junction 3 in particular) — possibly a shorter lookback window or a hybrid that blends LSTM with XGBoost's lag features
 - Deploy with a scheduled retraining pipeline instead of static model files
-- Add anomaly detection for unusual traffic spikes (accidents, events) separate from routine congestion
-- Lock down CORS (`allow_origins=["*"]`) to the dashboard's actual origin before treating this as production-ready
+- Show anomaly flags on the dashboard (currently API-only, not yet visualized)
 
 ## Author
 Akshat Chauhan — built as part of a 3rd-year B.Tech CSE ML internship project.
