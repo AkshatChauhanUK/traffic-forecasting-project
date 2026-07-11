@@ -7,9 +7,6 @@ __pycache__/
 dashboard/node_modules/
 dashboard/dist/
 
-# Data files (large, regenerable)
-data/features.csv
-
 # Environment
 .env
 
