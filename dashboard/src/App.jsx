@@ -66,12 +66,26 @@ export default function App() {
   const [forecast, setForecast] = useState(null);
   const [current, setCurrent] = useState(null);
   const [anomalies, setAnomalies] = useState([]);
+  const [junctionAnomalyCounts, setJunctionAnomalyCounts] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     axios.get(`${API_BASE}/junctions`)
-      .then((res) => setJunctions(res.data))
+      .then((res) => {
+        setJunctions(res.data);
+        Promise.all(
+          res.data.map((j) =>
+            axios.get(`${API_BASE}/anomalies/${j.junction}`)
+              .then((r) => ({ junction: j.junction, count: r.data.total_anomalies }))
+              .catch(() => ({ junction: j.junction, count: 0 }))
+          )
+        ).then((results) => {
+          const counts = {};
+          results.forEach((r) => { counts[r.junction] = r.count; });
+          setJunctionAnomalyCounts(counts);
+        });
+      })
       .catch(() => setError("Can't reach the API. Is uvicorn running on port 8000?"));
   }, []);
 
@@ -148,6 +162,9 @@ export default function App() {
           >
             Junction {j.junction}
             <span className="tab-model">{j.best_model}</span>
+            {junctionAnomalyCounts[j.junction] > 0 && (
+              <span className="tab-anomaly-badge">⚠️ {junctionAnomalyCounts[j.junction]}</span>
+            )}
           </button>
         ))}
       </div>

@@ -91,6 +91,16 @@ body {
   gap: 4px;
   transition: border-color 0.15s, color 0.15s;
 }
+.tab-anomaly-badge {
+  background: #FF4D4F22;
+  color: #FF4D4F;
+  border: 1px solid #FF4D4F55;
+  border-radius: 10px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: 6px;
+}
 
 .junction-tab:hover {
   border-color: #5B9DFF;
