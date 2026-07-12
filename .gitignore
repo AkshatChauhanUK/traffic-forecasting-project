@@ -14,5 +14,4 @@ dashboard/dist/
 .DS_Store
 
 # Models and reports
-models/
 data/features.csv
