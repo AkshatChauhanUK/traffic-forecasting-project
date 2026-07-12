@@ -12,3 +12,8 @@ dashboard/dist/
 
 # OS
 .DS_Store
+
+# Models and reports
+models/
+reports/
+data/features.csv
