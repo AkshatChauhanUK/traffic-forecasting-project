@@ -105,9 +105,12 @@ npm run dev
 Visit `http://localhost:5173`.
 
 ## What I'd Improve Next
-- Investigate why LSTM's walk-forward error compounds so much over 24h (junction 3 in particular) — possibly a shorter lookback window or a hybrid that blends LSTM with XGBoost's lag features
+- Investigate why LSTM's walk-forward error compounds so much over 24h 
+  (junction 3 in particular) — possibly a shorter lookback window or a 
+  hybrid that blends LSTM with XGBoost's lag features
 - Deploy with a scheduled retraining pipeline instead of static model files
-- Show anomaly flags on the dashboard (currently API-only, not yet visualized)
+- Add anomaly detail panel on dashboard — clicking a flagged point should 
+  show full context (z-score, expected vs actual, nearby hours)
 
 ## Author
 Akshat Chauhan — built as part of a 3rd-year B.Tech CSE ML internship project.
