@@ -14,6 +14,8 @@ const RISK_COLORS = {
   high: "#FF4D4F",
 };
 
+const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 function RiskBadge({ risk }) {
   return (
     <span className="risk-badge" style={{ "--risk-color": RISK_COLORS[risk] || "#888" }}>
@@ -59,6 +61,17 @@ function CustomTooltip({ active, payload, label }) {
   );
 }
 
+// Maps an average-vehicles value to a heatmap cell color (blue = low, red = high)
+function heatmapColor(value, max) {
+  if (max <= 0) return "#1A1F2B";
+  const ratio = Math.min(value / max, 1);
+  // interpolate from cool blue (#1E3A5F) to hot red (#FF4D4F)
+  const r = Math.round(30 + ratio * (255 - 30));
+  const g = Math.round(58 + ratio * (77 - 58));
+  const b = Math.round(95 + ratio * (79 - 95));
+  return `rgb(${r},${g},${b})`;
+}
+
 export default function App() {
   const [junctions, setJunctions] = useState([]);
   const [selected, setSelected] = useState(1);
@@ -67,6 +80,8 @@ export default function App() {
   const [current, setCurrent] = useState(null);
   const [anomalies, setAnomalies] = useState([]);
   const [junctionAnomalyCounts, setJunctionAnomalyCounts] = useState({});
+  const [heatmapData, setHeatmapData] = useState([]);
+  const [cityOverview, setCityOverview] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -74,6 +89,7 @@ export default function App() {
     axios.get(`${API_BASE}/junctions`)
       .then((res) => {
         setJunctions(res.data);
+
         Promise.all(
           res.data.map((j) =>
             axios.get(`${API_BASE}/anomalies/${j.junction}`)
@@ -84,6 +100,18 @@ export default function App() {
           const counts = {};
           results.forEach((r) => { counts[r.junction] = r.count; });
           setJunctionAnomalyCounts(counts);
+        });
+
+        Promise.all(
+          res.data.map((j) =>
+            axios.get(`${API_BASE}/predict/${j.junction}`)
+              .then((r) => ({ junction: j.junction, ...r.data }))
+              .catch(() => ({ junction: j.junction, predicted_vehicles: null, congestion_risk: "low" }))
+          )
+        ).then((results) => {
+          const overview = {};
+          results.forEach((r) => { overview[r.junction] = r; });
+          setCityOverview(overview);
         });
       })
       .catch(() => setError("Can't reach the API. Is uvicorn running on port 8000?"));
@@ -97,12 +125,14 @@ export default function App() {
       axios.get(`${API_BASE}/predict/${junctionId}/next24`),
       axios.get(`${API_BASE}/predict/${junctionId}`),
       axios.get(`${API_BASE}/anomalies/${junctionId}`),
+      axios.get(`${API_BASE}/heatmap/${junctionId}`),
     ])
-      .then(([histRes, forecastRes, predictRes, anomalyRes]) => {
+      .then(([histRes, forecastRes, predictRes, anomalyRes, heatmapRes]) => {
         setHistory(histRes.data);
         setForecast(forecastRes.data);
         setCurrent(predictRes.data);
         setAnomalies(anomalyRes.data.anomalies || []);
+        setHeatmapData(heatmapRes.data.data || []);
       })
       .catch(() => setError("Couldn't load data for this junction."))
       .finally(() => setLoading(false));
@@ -141,6 +171,15 @@ export default function App() {
 
   const anomalyCount = anomalies.length;
 
+  // Build a quick lookup grid for the heatmap: heatmapGrid[dayofweek][hour] = avg_vehicles
+  const heatmapGrid = {};
+  let heatmapMax = 0;
+  heatmapData.forEach((d) => {
+    if (!heatmapGrid[d.dayofweek]) heatmapGrid[d.dayofweek] = {};
+    heatmapGrid[d.dayofweek][d.hour] = d.avg_vehicles;
+    if (d.avg_vehicles > heatmapMax) heatmapMax = d.avg_vehicles;
+  });
+
   return (
     <div className="dashboard">
       <header className="dashboard-header">
@@ -152,6 +191,42 @@ export default function App() {
       </header>
 
       {error && <div className="error-banner">{error}</div>}
+
+      {/* City Overview — all junctions at a glance */}
+      {junctions.length > 0 && (
+        <div className="city-overview">
+          <h2>City Overview</h2>
+          <div className="city-overview-cards">
+            {junctions.map((j) => {
+              const info = cityOverview[j.junction];
+              const risk = info?.congestion_risk || "low";
+              return (
+                <button
+                  key={j.junction}
+                  className={`city-card ${selected === j.junction ? "active" : ""}`}
+                  style={{ "--risk-color": RISK_COLORS[risk] }}
+                  onClick={() => setSelected(j.junction)}
+                >
+                  <span className="city-card-header">
+                    <span className="city-card-title">Junction {j.junction}</span>
+                    <span className="city-card-risk-dot" />
+                  </span>
+                  <span className="city-card-value">
+                    {info?.predicted_vehicles ?? "--"}
+                    <span className="city-card-unit">vehicles/hr</span>
+                  </span>
+                  <span className="city-card-footer">
+                    <span className="city-card-model">{j.best_model}</span>
+                    {junctionAnomalyCounts[j.junction] > 0 && (
+                      <span className="city-card-anomaly">⚠️ {junctionAnomalyCounts[j.junction]}</span>
+                    )}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="junction-tabs">
         {junctions.map((j) => (
@@ -258,6 +333,50 @@ export default function App() {
               ))}
             </div>
           </div>
+
+          {/* Weekly Traffic Heatmap */}
+          {heatmapData.length > 0 && (
+            <div className="heatmap-panel">
+              <h2>Weekly Traffic Pattern</h2>
+              <p className="heatmap-sub">Average vehicles per hour, by day of week — Junction {selected}</p>
+              <div className="heatmap-grid-wrapper">
+                <div className="heatmap-grid">
+                  {/* Header row: hour labels */}
+                  <div className="heatmap-corner" />
+                  {Array.from({ length: 24 }, (_, h) => (
+                    <div key={`h-${h}`} className="heatmap-hour-label">
+                      {h % 3 === 0 ? h : ""}
+                    </div>
+                  ))}
+
+                  {/* One row per day */}
+                  {DAY_LABELS.map((label, dow) => (
+                    <div className="heatmap-row" key={`row-${dow}`}>
+                      <div className="heatmap-day-label">{label}</div>
+                      <div className="heatmap-row-cells">
+                        {Array.from({ length: 24 }, (_, h) => {
+                          const val = heatmapGrid[dow]?.[h];
+                          return (
+                            <div
+                              key={`cell-${dow}-${h}`}
+                              className="heatmap-cell"
+                              style={{ background: val != null ? heatmapColor(val, heatmapMax) : "#1A1F2B" }}
+                              title={val != null ? `${label} ${h}:00 — avg ${val} vehicles` : ""}
+                            />
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="heatmap-legend">
+                <span>Low</span>
+                <div className="heatmap-legend-gradient" />
+                <span>High</span>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>

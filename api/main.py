@@ -401,3 +401,32 @@ def get_anomalies(junction: int, hours: int = 72):
             for _, row in anomalies.iterrows()
         ],
     }
+@app.get("/heatmap/{junction}")
+def get_heatmap(junction: int):
+    """
+    Returns average traffic volume for every (day-of-week, hour) combination,
+    used to render a weekly traffic pattern heatmap on the dashboard.
+    """
+    _require_known_junction(junction)
+
+    df = get_feature_frame()
+    sub = df[df["Junction"] == junction]
+
+    stats = (
+        sub.groupby(["dayofweek", "hour"])["Vehicles"]
+        .mean()
+        .reset_index()
+        .rename(columns={"Vehicles": "avg_vehicles"})
+    )
+
+    return {
+        "junction": junction,
+        "data": [
+            {
+                "dayofweek": int(row["dayofweek"]),
+                "hour": int(row["hour"]),
+                "avg_vehicles": round(float(row["avg_vehicles"]), 2),
+            }
+            for _, row in stats.iterrows()
+        ],
+    }
