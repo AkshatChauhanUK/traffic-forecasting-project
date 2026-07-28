@@ -7,7 +7,7 @@ import {
 import axios from "axios";
 import "./App.css";
 
-const API_BASE = "https://traffic-forecasting-project-production.up.railway.app";
+const API_BASE ="https://traffic-forecasting-project.onrender.com";
 const RISK_COLORS = {
   low: "#3DDC84",
   medium: "#FFB020",
