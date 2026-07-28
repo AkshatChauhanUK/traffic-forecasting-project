@@ -228,21 +228,7 @@ export default function App() {
         </div>
       )}
 
-      <div className="junction-tabs">
-        {junctions.map((j) => (
-          <button
-            key={j.junction}
-            className={`junction-tab ${selected === j.junction ? "active" : ""}`}
-            onClick={() => setSelected(j.junction)}
-          >
-            Junction {j.junction}
-            <span className="tab-model">{j.best_model}</span>
-            {junctionAnomalyCounts[j.junction] > 0 && (
-              <span className="tab-anomaly-badge">⚠️ {junctionAnomalyCounts[j.junction]}</span>
-            )}
-          </button>
-        ))}
-      </div>
+    
 
       {loading ? (
         <div className="loading-state">Loading junction data…</div>
