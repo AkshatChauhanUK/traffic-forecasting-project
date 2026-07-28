@@ -4,7 +4,8 @@ An end-to-end machine learning system that forecasts hourly traffic volume acros
 
 ## Live Demo
 - **Dashboard:** [traffic-forecasting-project.vercel.app](https://traffic-forecasting-project.vercel.app)
-- **API:** [traffic-forecasting-project-production.up.railway.app/junctions](https://traffic-forecasting-project-production.up.railway.app/junctions)
+- **API:** [traffic-forecasting-project.onrender.com/junctions](https://traffic-forecasting-project.onrender.com/junctions)
+*(Note: hosted on Render's free tier — the API may take 30-60 seconds to respond after being idle.)*
 
 ## Problem Statement
 Government planners need to anticipate traffic congestion before it happens, not just react to it. This project builds a forecasting system that predicts vehicle counts one hour and twenty-four hours ahead at each junction, flags congestion risk, and surfaces it through a real-time monitoring dashboard — turning historical traffic data into a decision-support tool for infrastructure planning.
@@ -72,6 +73,7 @@ FastAPI backend serving:
 - `GET /predict/{junction}` — next-hour forecast with congestion risk
 - `GET /predict/{junction}/next24` — 24-hour walk-forward forecast
 - `GET /anomalies/{junction}` — flags unusual traffic spikes in the last 72h, separate from routine congestion
+- `GET /heatmap/{junction}` — average traffic by day-of-week and hour, powering the weekly pattern heatmap on the dashboard
 
 All three models (XGBoost, LSTM, SARIMA) are now fully servable — SARIMA previously had no inference path, now it loads a saved `.pkl` and predicts with exogenous features. CORS is locked to the dashboard's Vercel origin.
 
@@ -79,6 +81,10 @@ All three models (XGBoost, LSTM, SARIMA) are now fully servable — SARIMA previ
 
 ### 4. Dashboard (`dashboard/`)
 A React + Recharts console showing live predictions, a 72h-actual vs 24h-forecast chart with a congestion threshold line, and an hour-by-hour risk strip — built for a 2-minute live demo, not just a notebook printout.
+
+- **City Overview** — all four junctions shown at a glance, each with live next-hour forecast, congestion risk colour, and anomaly count; clicking a card switches the detailed view below to that junction.
+- **Anomaly visualization** — red triangle markers directly on the actual-traffic chart, a scrollable 72-hour anomaly strip, and a live anomaly-count badge on each junction card.
+- **Weekly Traffic Pattern heatmap** — a day-of-week × hour grid showing average traffic volume, making recurring congestion patterns (e.g. weekday rush hours) visible at a glance.
 
 ## Tech Stack
 Python, pandas, scikit-learn, XGBoost, statsmodels, TensorFlow/Keras, FastAPI, React, Recharts, Vite
@@ -105,12 +111,15 @@ npm run dev
 Visit `http://localhost:5173`.
 
 ## What I'd Improve Next
-- Investigate why LSTM's walk-forward error compounds so much over 24h 
-  (junction 3 in particular) — possibly a shorter lookback window or a 
+- Investigate why LSTM's walk-forward error compounds so much over 24h
+  (junction 3 in particular) — possibly a shorter lookback window or a
   hybrid that blends LSTM with XGBoost's lag features
 - Deploy with a scheduled retraining pipeline instead of static model files
-- Add anomaly detail panel on dashboard — clicking a flagged point should 
+- Add anomaly detail panel on dashboard — clicking a flagged point should
   show full context (z-score, expected vs actual, nearby hours)
+- Restore SARIMA support for Junction 1 without bloating the git repo
+  (currently excluded from version control due to file size — the trained
+  model was 188MB, over GitHub's 100MB limit)
 
 ## Author
 Akshat Chauhan — built as part of a 3rd-year B.Tech CSE ML internship project.
